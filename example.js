@@ -1,6 +1,4 @@
-const frp = require('./frp')
-const vec = require('./vec')
-const fn  = require('./fn')
+const frp = require('./')
 
 const a = frp.property(1)
 const b = frp.stream()
