@@ -3,24 +3,25 @@ const now = require('right-now')
 const EE  = require('events').EventEmitter
 
 function frp(first) {
-	var res = [].reduce.call(arguments, function(acc, stream, i) {
-		if(i != 0)
-			acc(stream.handle)
+	const streams = [].slice.call(arguments, 1)
 
-		return stream
-	})
-
-	if(first.handle) {
-		function stream(handler) {
-			res(handler)
+	if(frp.stream.is(first))
+		return start(first)
+	else
+		return function(input) {
+			return start(first(input))
 		}
-		stream.handle = first.handle
-		return stream
-	} else return res
+
+	function start(first) {
+		return streams.reduce(function(acc, stream) {
+			return stream(acc)
+		}, first)
+	}
 }
 
 frp.stream = function() {
 	const handlers = []
+
 	function stream(handler) {
 		handlers.push(handler)
 		function off() {
@@ -31,46 +32,75 @@ frp.stream = function() {
 		off.stream = stream
 		return off
 	}
+	stream.stream = stream
+	stream.watch  = stream
+
 	stream.emit = function(v) {
 		handlers.forEach(function(handler) {
-			handler(v)
+			handler(null, v)
 		})
+		return stream
 	}
-	stream.watch = function(handler) {
-		return stream(handler)
+	stream.error = function(err) {
+		handlers.forEach(function(handler) {
+			handler(err)
+		})
+		if(handlers.length == 0)
+			throw err
+		return stream
 	}
 
 	return stream
+}
+frp.stream.is = function(stream) {
+	return typeof(stream) == 'function' && typeof(stream.watch) == 'function'
 }
 
 frp.property = function(current) {
 	const stream = frp.stream()
-	stream(function(v) {
-		stream.current = stream.now = v
+	stream(function(err, v) {
+		if(!err)
+			stream.current = stream.now = v
 	})
 	stream.emit(current)
 	stream.watch = function(handler) {
-		handler(stream.now)
+		handler(null, stream.now)
 		return stream(handler)
 	}
+	stream.watch.stream = stream
 	return stream
 }
 
 frp.propertyify = function() {
-	const res = frp.property()
-	res.handle = function(v) {
-		res.emit(v)
+	return function(input) {
+		const out = frp.property()
+		input.watch(function(err, v) {
+			if(err)
+				out.error(err)
+			else
+				out.emit(v)
+		})
+		return out
 	}
-	return res
 }
 
 frp.map = function(f) {
 	if(typeof(f) != 'function') throw new TypeError('frp.map requires a function')
-	const res = frp.stream()
-	res.handle = function(v) {
-		res.emit(f(v))
+	return function(input) {
+		const out = frp.stream()
+		input.watch(function(err, v) {
+			if(err) {
+				out.error(err)
+			} else {
+				try {
+					out.emit(f(v))
+				} catch(e) {
+					out.error(e)
+				}
+			}
+		})
+		return out
 	}
-	return res
 }
 
 frp.inject = function(f) {
@@ -82,83 +112,135 @@ frp.inject = function(f) {
 }
 
 frp.sampleBy = function(tick) {
-	const res = frp.stream()
-	var last
-	res.handle = function(v) {
-		last = v
+	if(!frp.stream.is(tick)) throw new TypeError('tick needs to be a stream')
+	return function(input) {
+		const out = frp.stream()
+
+		var last
+		input.watch(function(err, v) {
+			if(err)
+				out.error(err)
+			else
+				last = v
+		})
+
+		tick(function(err, v) {
+			if(err) { // should this emit the error to out or throw it or what?
+				console.error(err)
+			} else if(last !== undefined) {
+				out.emit(last)
+				last = undefined
+			}
+		})
+
+		return out
 	}
-	const off = tick(function() {
-		res.emit(last)
-	})
-	return res
 }
 
 frp.scan = function(acc, reducer) {
-	const res = frp.property(acc)
-	res.handle = function(v) {
-		res.emit(reducer(res.now, v))
+	return function(input) {
+		const out = frp.property(acc)
+		input(function(err, v) {
+			if(err)
+				out.error(err)
+			else
+				out.emit(reducer(out.now, v))
+		})
+		return out
 	}
-	return res
 }
 
 frp.debounce = function(timeout) {
-	const res = frp.stream()
-	var last = 0
-	res.handle = function(v) {
-		const time = now()
-		if(time - last >= timeout) {
-			res.emit(v)
-		}
-		last = time
+	return function(input) {
+		const out = frp.stream()
+		var last = 0
+		input.watch(function(err, v) {
+			if(err) {
+				out.error(err)
+			} else {
+				const time = now()
+				if(time - last >= timeout) {
+					out.emit(v)
+				}
+				last = time
+			}
+		})
+		return out
 	}
-	return res
 }
 
-frp.throttle = function(timeout) {
-	const res = frp.stream()
-	var last = 0
-	res.handle = function(v) {
-		const time = now()
-		if(time - last >= timeout) {
-			res.emit(v)
-			last = time
+frp.throttle = function(delay) {
+	return function(input) {
+		const out = frp.stream()
+		var id
+		var last
+		var immediate = false
+
+		function timeout() {
+			if(last === undefined) {
+				immediate = true
+			} else {
+				out.emit(last)
+				last = undefined
+				id = setTimeout(timeout, delay)
+			}
 		}
+
+		id = setTimeout(timeout, delay)
+
+		input.watch(function(err, v) {
+			if(err) {
+				out.error(err)
+			} else {
+				if(immediate) {
+					out.emit(v)
+					immediate = false
+					id = setTimeout(timeout, delay)
+				} else {
+					last = v
+				}
+			}
+		})
+		return out
 	}
-	return res
 }
 
 frp.merge = function() {
-	const res = frp.stream()
+	const out = frp.stream()
 	;[].forEach.call(arguments, function(stream) {
-		stream(function(v) {
-			res.emit(v)
+		stream(function(err, v) {
+			if(err)
+				out.error(err)
+			else
+				out.emit(v)
 		})
 	})
-	return res
+	return out
 }
 
 frp.combine = function() {
-	const res = frp.property()
+	const out = frp.property([])
 
 	const values = []
-	var ready = false
 
 	;[].forEach.call(arguments, function(stream, i) {
 		if(typeof(stream) == 'function' && typeof(stream.watch) == 'function') {
-			stream.watch(function(v) {
-				values[i] = v
-				if(ready)
-					res.emit([].concat.call(values))
+			stream.watch(function(err, v) {
+				if(err) {
+					out.error(err)
+				} else {
+					values[i] = v
+					out.emit([].concat.call(values))
+				}
 			})
 		} else {
 			values[i] = stream
 		}
 	})
 
-	res.emit([].concat.call(values))
-	ready = true
+	out.emit([].concat.call(values))
 
-	return res
+	return out
 }
 
 module.exports = frp
