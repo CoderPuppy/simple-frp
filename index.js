@@ -26,7 +26,7 @@ frp.stream = function() {
 		handlers.push(handler)
 		function off() {
 			if(~handlers.indexOf(handler))
-				stream.splice(handlers.indexOf(handler), 1)
+				handlers.splice(handlers.indexOf(handler), 1)
 			return stream
 		}
 		off.stream = stream
@@ -69,6 +69,16 @@ frp.property = function(current) {
 	}
 	stream.watch.stream = stream
 	return stream
+}
+frp.property.is = function(property) {
+	if(!frp.stream.is(property))
+		return
+
+	var called = false
+	property.watch(function(err, v) {
+		called = true
+	})()
+	return called
 }
 
 frp.propertyify = function() {
@@ -125,12 +135,10 @@ frp.sampleBy = function(tick) {
 		})
 
 		tick(function(err, v) {
-			if(err) { // should this emit the error to out or throw it or what?
-				console.error(err)
-			} else if(last !== undefined) {
+			if(err) // should this emit the error to out or throw it or what?
+				out.error(err)
+			else
 				out.emit(last)
-				last = undefined
-			}
 		})
 
 		return out
